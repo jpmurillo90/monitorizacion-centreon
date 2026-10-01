@@ -7,6 +7,8 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 import zipfile
+import smtplib
+from email.message import EmailMessage
 import pandas as pd
 import pytz
 
@@ -543,6 +545,58 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
         'servicios': len(ultimos_errores), 'inicio': fecha_inicio, 'fin': fecha_fin,
     }
 
+def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inicio, fecha_fin):
+    """Envía un informe HTML mediante Gmail SMTP usando exclusivamente Streamlit Secrets."""
+    import streamlit as st
+
+    try:
+        config = st.secrets['email']
+        smtp_server = str(config.get('smtp_server', 'smtp.gmail.com')).strip()
+        smtp_port = int(config.get('smtp_port', 587))
+        usuario = str(config['usuario']).strip()
+        password = str(config['password']).replace(' ', '')
+        remitente = str(config.get('remitente', usuario)).strip()
+        clave_destinos = 'destinatarios_normal' if tipo.lower() == 'normal' else 'destinatarios_full'
+        destinatarios = list(config[clave_destinos])
+        destinatarios = [str(x).strip() for x in destinatarios if str(x).strip()]
+    except Exception as exc:
+        raise RuntimeError('Falta o es incorrecta la configuración [email] en Streamlit Secrets.') from exc
+
+    if not usuario or not password or not remitente or not destinatarios:
+        raise RuntimeError('La configuración de correo está incompleta en Streamlit Secrets.')
+
+    msg = EmailMessage()
+    msg['From'] = remitente
+    msg['To'] = ', '.join(destinatarios)
+    msg['Subject'] = f'Informe Monitorización Centreon · {centro} · {fecha_fin}'
+    msg.set_content(
+        f'Se adjunta el informe {tipo.upper()} de monitorización Centreon.\n\n'
+        f'Centro: {centro}\n'
+        f'Periodo: {fecha_inicio} → {fecha_fin}\n\n'
+        'Informe generado automáticamente desde la aplicación de Monitorización Centreon.'
+    )
+    msg.add_attachment(
+        html_informe.encode('utf-8'),
+        maintype='text',
+        subtype='html',
+        filename=nombre_archivo
+    )
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(usuario, password)
+            smtp.send_message(msg)
+    except smtplib.SMTPAuthenticationError as exc:
+        raise RuntimeError('Gmail ha rechazado la autenticación. Revisa el usuario y la contraseña de aplicación en Secrets.') from exc
+    except Exception as exc:
+        raise RuntimeError(f'No se ha podido enviar el correo: {exc}') from exc
+
+    return destinatarios
+
+
 def exigir_acceso():
     """Cuenta compartida configurada exclusivamente en Streamlit Secrets."""
     import hashlib
@@ -614,7 +668,7 @@ def main():
     st.set_page_config(page_title='Centreon · Informes CI', page_icon='📡', layout='wide')
     exigir_acceso()
     st.title('Monitorización Centreon')
-    st.caption('SAT CI · Generador de informes · v1.1')
+    st.caption('SAT CI · Generador de informes · v1.2 · envío por email')
     with st.sidebar:
         st.header('Configuración del informe')
         centro = st.text_input('Centro / título', 'SAT CI Puertollano')
@@ -652,13 +706,31 @@ def main():
     fecha = result['fecha']
     nombres = {'normal': f'Informe_monitorización_SAT_{fecha}.html', 'full': f'Informe_monitorización_SAT_{fecha}_FULL.html'}
     a,b,c = st.columns(3)
-    a.download_button('⬇ Informe NORMAL', result['normal'], file_name=nombres['normal'], mime='text/html')
-    b.download_button('⬇ Informe FULL', result['full'], file_name=nombres['full'], mime='text/html')
+    a.download_button('⬇ Informe NORMAL', result['normal'], file_name=nombres['normal'], mime='text/html', use_container_width=True)
+    b.download_button('⬇ Informe FULL', result['full'], file_name=nombres['full'], mime='text/html', use_container_width=True)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as z:
         for key, name in nombres.items():
             z.writestr(name, result[key])
-    c.download_button('⬇ Ambos informes (ZIP)', buffer.getvalue(), file_name=f'Informes_Centreon_{fecha}.zip', mime='application/zip')
+    c.download_button('⬇ Ambos informes (ZIP)', buffer.getvalue(), file_name=f'Informes_Centreon_{fecha}.zip', mime='application/zip', use_container_width=True)
+
+    st.subheader('Envío por email')
+    e1, e2 = st.columns(2)
+    if e1.button('📧 Enviar informe NORMAL', type='primary', use_container_width=True):
+        try:
+            with st.spinner('Enviando informe NORMAL…'):
+                destinos = enviar_informe_email('normal', result['normal'], nombres['normal'], centro, result['inicio'], result['fin'])
+            st.success('Informe NORMAL enviado correctamente a: ' + ', '.join(destinos))
+        except RuntimeError as exc:
+            st.error(str(exc))
+
+    if e2.button('📧 Enviar informe FULL', use_container_width=True):
+        try:
+            with st.spinner('Enviando informe FULL…'):
+                destinos = enviar_informe_email('full', result['full'], nombres['full'], centro, result['inicio'], result['fin'])
+            st.success('Informe FULL enviado correctamente a: ' + ', '.join(destinos))
+        except RuntimeError as exc:
+            st.error(str(exc))
     st.subheader('Vista previa')
     seleccion = st.radio('Versión', ['NORMAL', 'FULL'], horizontal=True)
     if seleccion == 'FULL':
