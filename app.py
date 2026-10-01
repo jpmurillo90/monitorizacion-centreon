@@ -546,6 +546,24 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
         'servicios': len(ultimos_errores), 'inicio': fecha_inicio, 'fin': fecha_fin,
     }
 
+
+def formatear_periodo_centreon(valor):
+    """Formatea fechas de cabecera Centreon como dd/mm/YYYY HH:MM."""
+    texto = str(valor).strip()
+    formatos = (
+        '%Y/%m/%d (%H:%M:%S)',
+        '%Y/%m/%d %H:%M:%S',
+        '%Y-%m-%d %H:%M:%S',
+        '%d/%m/%Y %H:%M:%S',
+        '%d/%m/%Y %H:%M',
+    )
+    for formato in formatos:
+        try:
+            return datetime.strptime(texto, formato).strftime('%d/%m/%Y %H:%M')
+        except ValueError:
+            pass
+    return texto
+
 def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inicio, fecha_fin):
     """Envía un informe HTML mediante Gmail SMTP usando exclusivamente Streamlit Secrets."""
     import streamlit as st
@@ -569,6 +587,18 @@ def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inici
 
     def fecha_es(valor):
         texto = str(valor).strip()
+        formatos = (
+            '%Y/%m/%d (%H:%M:%S)',
+            '%Y/%m/%d %H:%M:%S',
+            '%Y-%m-%d %H:%M:%S',
+            '%d/%m/%Y %H:%M:%S',
+            '%d/%m/%Y %H:%M',
+        )
+        for formato in formatos:
+            try:
+                return datetime.strptime(texto, formato).strftime('%d/%m/%Y %H:%M')
+            except ValueError:
+                pass
         try:
             fecha = pd.to_datetime(texto, errors='raise')
             return fecha.strftime('%d/%m/%Y %H:%M')
@@ -712,7 +742,7 @@ def main():
         return
     for aviso in result['avisos']:
         st.warning(aviso)
-    st.caption(f"Periodo indicado por Centreon: {result['inicio']} → {result['fin']} · {result['eventos']} eventos · {result['hosts']} hosts")
+    st.caption(f"Periodo indicado por Centreon: {formatear_periodo_centreon(result['inicio'])} → {formatear_periodo_centreon(result['fin'])} · {result['eventos']} eventos · {result['hosts']} hosts")
     a,b,c = st.columns(3)
     a.metric('Sin recuperación registrada', result['pendientes'])
     b.metric('Con caídas recuperadas', result['recuperados'])
