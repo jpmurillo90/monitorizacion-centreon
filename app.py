@@ -1,4 +1,4 @@
-"""Monitorización Centreon · v1.0. Ejecutar: streamlit run app.py"""
+"""Monitorización Centreon · v1.1. Ejecutar: streamlit run app.py"""
 import base64
 import csv
 import io
@@ -543,12 +543,78 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
         'servicios': len(ultimos_errores), 'inicio': fecha_inicio, 'fin': fecha_fin,
     }
 
+def exigir_acceso():
+    """Cuenta compartida configurada exclusivamente en Streamlit Secrets."""
+    import hashlib
+    import hmac
+    import time
+    import streamlit as st
+
+    try:
+        config = st.secrets['acceso']
+        usuario = config['usuario']
+        clave = config['password']
+        valido = isinstance(usuario, str) and isinstance(clave, str)
+        valido = valido and bool(usuario.strip()) and len(clave) >= 16
+        valido = valido and clave != 'CAMBIA_ESTO_POR_TU_CLAVE'
+    except Exception:
+        valido = False
+    if not valido:
+        st.title('Monitorización Centreon')
+        st.info('Acceso pendiente de configuración. El administrador debe configurar [acceso] en Secrets con usuario y password (mínimo 16 caracteres).')
+        st.stop()
+
+    firma = hmac.new(clave.encode(), usuario.encode(), hashlib.sha256).hexdigest()
+    if st.session_state.get('_acceso_firma') == firma:
+        with st.sidebar:
+            st.caption(f'Sesión: {usuario}')
+            if st.button('Cerrar sesión'):
+                for key in list(st.session_state):
+                    del st.session_state[key]
+                st.rerun()
+        return
+
+    # Elimina datos de una sesión anterior si se han cambiado las credenciales.
+    if '_acceso_firma' in st.session_state:
+        for key in list(st.session_state):
+            del st.session_state[key]
+
+    st.title('Monitorización Centreon')
+    st.caption('Acceso del equipo · SAT CI')
+    st.write('Introduce la cuenta común para acceder a los informes.')
+    with st.form('form_acceso', clear_on_submit=True):
+        login = st.text_input('Usuario')
+        password = st.text_input('Contraseña', type='password')
+        entrar = st.form_submit_button('Entrar', type='primary')
+    if entrar:
+        restante = st.session_state.get('_bloqueo_hasta', 0) - time.time()
+        if restante > 0:
+            st.error(f'Espera {int(restante) + 1} segundos antes de volver a intentarlo.')
+        else:
+            usuario_ok = hmac.compare_digest(login.strip().encode(), usuario.encode())
+            clave_ok = hmac.compare_digest(password.encode(), clave.encode())
+            if usuario_ok and clave_ok:
+                st.session_state['_acceso_firma'] = firma
+                st.session_state.pop('_fallos_acceso', None)
+                st.session_state.pop('_bloqueo_hasta', None)
+                st.rerun()
+            else:
+                fallos = st.session_state.get('_fallos_acceso', 0) + 1
+                st.session_state['_fallos_acceso'] = fallos
+                if fallos >= 5:
+                    st.session_state['_bloqueo_hasta'] = time.time() + 60
+                    st.session_state['_fallos_acceso'] = 0
+                st.error('Usuario o contraseña incorrectos.')
+    st.stop()
+
+
 def main():
     import streamlit as st
     import streamlit.components.v1 as components
     st.set_page_config(page_title='Centreon · Informes CI', page_icon='📡', layout='wide')
+    exigir_acceso()
     st.title('Monitorización Centreon')
-    st.caption('SAT CI · Generador de informes · v1.0')
+    st.caption('SAT CI · Generador de informes · v1.1')
     with st.sidebar:
         st.header('Configuración del informe')
         centro = st.text_input('Centro / título', 'SAT CI Puertollano')
