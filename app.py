@@ -9,6 +9,7 @@ from pathlib import Path
 import zipfile
 import smtplib
 from email.message import EmailMessage
+from email.utils import formataddr
 import pandas as pd
 import pytz
 
@@ -556,6 +557,7 @@ def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inici
         usuario = str(config['usuario']).strip()
         password = str(config['password']).replace(' ', '')
         remitente = str(config.get('remitente', usuario)).strip()
+        nombre_remitente = str(config.get('nombre_remitente', 'Monitorización Centreon · SAT CI Puertollano')).strip()
         clave_destinos = 'destinatarios_normal' if tipo.lower() == 'normal' else 'destinatarios_full'
         destinatarios = list(config[clave_destinos])
         destinatarios = [str(x).strip() for x in destinatarios if str(x).strip()]
@@ -565,16 +567,27 @@ def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inici
     if not usuario or not password or not remitente or not destinatarios:
         raise RuntimeError('La configuración de correo está incompleta en Streamlit Secrets.')
 
+    def fecha_es(valor):
+        texto = str(valor).strip()
+        try:
+            fecha = pd.to_datetime(texto, errors='raise')
+            return fecha.strftime('%d/%m/%Y %H:%M')
+        except Exception:
+            return texto
+
+    fecha_inicio_es = fecha_es(fecha_inicio)
+    fecha_fin_es = fecha_es(fecha_fin)
+
     msg = EmailMessage()
-    msg['From'] = remitente
+    msg['From'] = formataddr((nombre_remitente, remitente))
     msg['To'] = ', '.join(destinatarios)
-    msg['Subject'] = f'Informe Monitorización Centreon · {centro} · {fecha_fin}'
+    msg['Subject'] = f'Informe Monitorización Centreon · {centro} · {fecha_fin_es}'
     msg.set_content(
         'Buenos días,\n\n'
         'Adjunto se remite el informe de monitorización Centreon correspondiente al periodo indicado.\n\n'
         f'Centro: {centro}\n'
-        f'Desde: {fecha_inicio}\n'
-        f'Hasta: {fecha_fin}\n\n'
+        f'Desde: {fecha_inicio_es}\n'
+        f'Hasta: {fecha_fin_es}\n\n'
         'Informe generado automáticamente desde la aplicación de Monitorización Centreon.'
     )
     msg.add_attachment(
