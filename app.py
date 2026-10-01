@@ -570,9 +570,11 @@ def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inici
     msg['To'] = ', '.join(destinatarios)
     msg['Subject'] = f'Informe Monitorización Centreon · {centro} · {fecha_fin}'
     msg.set_content(
-        f'Se adjunta el informe {tipo.upper()} de monitorización Centreon.\n\n'
+        'Buenos días,\n\n'
+        'Adjunto se remite el informe de monitorización Centreon correspondiente al periodo indicado.\n\n'
         f'Centro: {centro}\n'
-        f'Periodo: {fecha_inicio} → {fecha_fin}\n\n'
+        f'Desde: {fecha_inicio}\n'
+        f'Hasta: {fecha_fin}\n\n'
         'Informe generado automáticamente desde la aplicación de Monitorización Centreon.'
     )
     msg.add_attachment(
@@ -668,11 +670,11 @@ def main():
     st.set_page_config(page_title='Centreon · Informes CI', page_icon='📡', layout='wide')
     exigir_acceso()
     st.title('Monitorización Centreon')
-    st.caption('SAT CI · Generador de informes · v1.2 · envío por email')
+    st.caption('SAT CI · Generador de informes · v1.3 · envío por email')
     with st.sidebar:
         st.header('Configuración del informe')
         centro = st.text_input('Centro / título', 'SAT CI Puertollano')
-        zona = st.selectbox('Zona horaria del CSV', ['UTC', 'Europe/Madrid'], help='UTC conserva la conversión de tu script de Colab. Si Centreon ya exporta hora española, selecciona Europe/Madrid.')
+        zona = 'Europe/Madrid'
         modo = st.radio('Alertas de servicios', ['Histórico del periodo', 'Último estado registrado'], help='Histórico conserva el último error de cada servicio aunque luego se recupere. Último estado solo muestra servicios cuyo último evento del CSV es una alerta.')
         logo_upload = st.file_uploader('Logo Minsait (PNG opcional)', type=['png'])
         st.caption('También puedes añadir logo_minsait.png junto a app.py.')
@@ -705,6 +707,7 @@ def main():
     st.caption('El CSV refleja un periodo, no el estado en vivo. Un mismo host puede figurar en recuperados y pendientes si vuelve a caer.')
     fecha = result['fecha']
     nombres = {'normal': f'Informe_monitorización_SAT_{fecha}.html', 'full': f'Informe_monitorización_SAT_{fecha}_FULL.html'}
+    nombre_email = f'Informe_monitorización_SAT_{fecha}.html'
     a,b,c = st.columns(3)
     a.download_button('⬇ Informe NORMAL', result['normal'], file_name=nombres['normal'], mime='text/html', use_container_width=True)
     b.download_button('⬇ Informe FULL', result['full'], file_name=nombres['full'], mime='text/html', use_container_width=True)
@@ -719,16 +722,16 @@ def main():
     if e1.button('📧 Enviar informe NORMAL', type='primary', use_container_width=True):
         try:
             with st.spinner('Enviando informe NORMAL…'):
-                destinos = enviar_informe_email('normal', result['normal'], nombres['normal'], centro, result['inicio'], result['fin'])
-            st.success('Informe NORMAL enviado correctamente a: ' + ', '.join(destinos))
+                destinos = enviar_informe_email('normal', result['normal'], nombre_email, centro, result['inicio'], result['fin'])
+            st.success('Informe enviado correctamente a: ' + ', '.join(destinos))
         except RuntimeError as exc:
             st.error(str(exc))
 
     if e2.button('📧 Enviar informe FULL', use_container_width=True):
         try:
             with st.spinner('Enviando informe FULL…'):
-                destinos = enviar_informe_email('full', result['full'], nombres['full'], centro, result['inicio'], result['fin'])
-            st.success('Informe FULL enviado correctamente a: ' + ', '.join(destinos))
+                destinos = enviar_informe_email('full', result['full'], nombre_email, centro, result['inicio'], result['fin'])
+            st.success('Informe enviado correctamente a: ' + ', '.join(destinos))
         except RuntimeError as exc:
             st.error(str(exc))
     st.subheader('Vista previa')
