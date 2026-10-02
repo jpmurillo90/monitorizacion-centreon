@@ -1,4 +1,4 @@
-"""Monitorización Centreon · v1.7. Ejecutar: streamlit run app.py"""
+"""Monitorización Centreon · v1.8. Ejecutar: streamlit run app.py"""
 import base64
 import csv
 import io
@@ -147,39 +147,47 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
             elif tipo_eq == 'RED': rec_red_consolidados.append(datos_consolidados)
             else: rec_otros_consolidados.append(datos_consolidados)
 
+    # Normalizamos el estado para evitar que espacios, minúsculas u otras
+    # pequeñas variaciones del CSV hagan desaparecer WARNING.
+    otros_df = otros_df.copy()
+    otros_df['_StatusNorm'] = otros_df['Status'].astype(str).str.strip().str.upper()
+
     estados_alerta = ['WARNING', 'CRITICAL', 'UNKNOWN', 'DOWN']
-    errores_df = otros_df[otros_df['Status'].isin(estados_alerta)].copy()
+    errores_df = otros_df[otros_df['_StatusNorm'].isin(estados_alerta)].copy()
+    errores_df['Status'] = errores_df['_StatusNorm']
 
     if modo_servicios == 'historico':
-        # FULL/HISTÓRICO:
-        # conserva TODOS los servicios distintos que hayan generado una alerta
-        # durante el periodo. Para cada Host + Servicio se muestra su última
-        # alerta, pero nunca se reduce a una sola alerta por host.
+        # FULL / HISTÓRICO:
+        # Una fila por cada Host + Servicio + Estado de alerta.
+        #
+        # Esto es intencionado: si un mismo servicio tuvo WARNING y después
+        # CRITICAL durante el periodo, FULL muestra ambos. De esta forma un
+        # WARNING histórico nunca queda oculto porque posteriormente el mismo
+        # servicio haya pasado a CRITICAL, UNKNOWN u OK.
         ultimos_errores = (
             errores_df
-            .sort_values(['Host', 'Service', 'Datetime'], kind='stable')
-            .groupby(['Host', 'Service'], as_index=False, sort=False)
+            .sort_values(['Host', 'Service', 'Status', 'Datetime'], kind='stable')
+            .groupby(['Host', 'Service', 'Status'], as_index=False, sort=False)
             .tail(1)
             .copy()
         )
 
-        # Nº de eventos de alerta que tuvo cada servicio durante el periodo.
         conteos_alerta = (
             errores_df
-            .groupby(['Host', 'Service'], dropna=False)
+            .groupby(['Host', 'Service', 'Status'], dropna=False)
             .size()
             .rename('Num_Alertas')
             .reset_index()
         )
         ultimos_errores = ultimos_errores.merge(
             conteos_alerta,
-            on=['Host', 'Service'],
+            on=['Host', 'Service', 'Status'],
             how='left'
         )
     else:
         # ÚLTIMO ESTADO:
-        # solo aparecen los servicios cuyo último evento real del CSV
-        # continúa siendo WARNING/CRITICAL/UNKNOWN/DOWN.
+        # Solo aparece un servicio cuando su último evento del periodo sigue
+        # siendo WARNING/CRITICAL/UNKNOWN/DOWN.
         ultimos = (
             otros_df
             .sort_values(['Host', 'Service', 'Datetime'], kind='stable')
@@ -187,8 +195,15 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
             .tail(1)
             .copy()
         )
-        ultimos_errores = ultimos[ultimos['Status'].isin(estados_alerta)].copy()
+        ultimos_errores = ultimos[
+            ultimos['_StatusNorm'].isin(estados_alerta)
+        ].copy()
+        ultimos_errores['Status'] = ultimos_errores['_StatusNorm']
         ultimos_errores['Num_Alertas'] = 1
+
+    # Campo auxiliar ya no necesario para el informe.
+    if '_StatusNorm' in ultimos_errores.columns:
+        ultimos_errores = ultimos_errores.drop(columns=['_StatusNorm'])
 
     # Agrupación visual estable: todos los servicios de un mismo equipo juntos.
     if not ultimos_errores.empty:
