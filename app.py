@@ -1,4 +1,4 @@
-"""Monitorización Centreon · v1.1. Ejecutar: streamlit run app.py"""
+"""Monitorización Centreon · v1.7. Ejecutar: streamlit run app.py"""
 import base64
 import csv
 import io
@@ -147,12 +147,59 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
             elif tipo_eq == 'RED': rec_red_consolidados.append(datos_consolidados)
             else: rec_otros_consolidados.append(datos_consolidados)
 
-    errores_df = otros_df[otros_df['Status'].isin(['WARNING', 'CRITICAL', 'UNKNOWN', 'DOWN'])]
+    estados_alerta = ['WARNING', 'CRITICAL', 'UNKNOWN', 'DOWN']
+    errores_df = otros_df[otros_df['Status'].isin(estados_alerta)].copy()
+
     if modo_servicios == 'historico':
-        ultimos_errores = errores_df.groupby(['Host', 'Service'], sort=False).tail(1).copy()
+        # FULL/HISTÓRICO:
+        # conserva TODOS los servicios distintos que hayan generado una alerta
+        # durante el periodo. Para cada Host + Servicio se muestra su última
+        # alerta, pero nunca se reduce a una sola alerta por host.
+        ultimos_errores = (
+            errores_df
+            .sort_values(['Host', 'Service', 'Datetime'], kind='stable')
+            .groupby(['Host', 'Service'], as_index=False, sort=False)
+            .tail(1)
+            .copy()
+        )
+
+        # Nº de eventos de alerta que tuvo cada servicio durante el periodo.
+        conteos_alerta = (
+            errores_df
+            .groupby(['Host', 'Service'], dropna=False)
+            .size()
+            .rename('Num_Alertas')
+            .reset_index()
+        )
+        ultimos_errores = ultimos_errores.merge(
+            conteos_alerta,
+            on=['Host', 'Service'],
+            how='left'
+        )
     else:
-        ultimos = otros_df.groupby(['Host', 'Service'], sort=False).tail(1)
-        ultimos_errores = ultimos[ultimos['Status'].isin(['WARNING', 'CRITICAL', 'UNKNOWN', 'DOWN'])].copy()
+        # ÚLTIMO ESTADO:
+        # solo aparecen los servicios cuyo último evento real del CSV
+        # continúa siendo WARNING/CRITICAL/UNKNOWN/DOWN.
+        ultimos = (
+            otros_df
+            .sort_values(['Host', 'Service', 'Datetime'], kind='stable')
+            .groupby(['Host', 'Service'], as_index=False, sort=False)
+            .tail(1)
+            .copy()
+        )
+        ultimos_errores = ultimos[ultimos['Status'].isin(estados_alerta)].copy()
+        ultimos_errores['Num_Alertas'] = 1
+
+    # Agrupación visual estable: todos los servicios de un mismo equipo juntos.
+    if not ultimos_errores.empty:
+        prioridad_estado = {'CRITICAL': 0, 'DOWN': 0, 'WARNING': 1, 'UNKNOWN': 2}
+        ultimos_errores['_Prioridad'] = ultimos_errores['Status'].map(prioridad_estado).fillna(9)
+        ultimos_errores = (
+            ultimos_errores
+            .sort_values(['Host', '_Prioridad', 'Service', 'Datetime'], kind='stable')
+            .drop(columns=['_Prioridad'])
+            .reset_index(drop=True)
+        )
 
     total_sin_rec = len(no_recuperados_lista)
     total_rec = len(rec_servidores_consolidados) + len(rec_red_consolidados) + len(rec_otros_consolidados)
@@ -188,13 +235,52 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
         return filas
 
     def construir_filas_otros(df_errores):
-        if df_errores.empty: return ""
+        if df_errores.empty:
+            return ""
+
         filas = ""
+        host_anterior = None
+
         for _, row in df_errores.iterrows():
+            host = str(row['Host'])
             status = str(row['Status']).upper()
-            border_cls = 'status-border-crit' if status in ['CRITICAL','DOWN'] else ('status-border-warn' if status == 'WARNING' else 'status-border-unknown')
+            border_cls = (
+                'status-border-crit' if status in ['CRITICAL', 'DOWN']
+                else ('status-border-warn' if status == 'WARNING' else 'status-border-unknown')
+            )
             status_class = badge_class(row['Status'])
-            filas += f"<tr class='filterable-row {border_cls}' data-origin='servicios'><td><b>{esc(row['Host'])}</b></td><td>{esc(row['Service'])}</td><td><span class='badge {status_class}'>{esc(row['Status'])}</span></td><td>{row['Datetime'].strftime('%d/%m/%Y %H:%M:%S')}</td><td>{esc(row['Output'])}</td></tr>"
+            num_alertas = int(row.get('Num_Alertas', 1))
+
+            # Se marca claramente el comienzo de cada equipo y se mantienen
+            # debajo todos sus servicios afectados.
+            es_nuevo_host = host != host_anterior
+            estilo_grupo = "border-top:3px solid #5a0d2e;" if es_nuevo_host else ""
+            host_html = (
+                f"<b>{esc(host)}</b>"
+                if es_nuevo_host
+                else f"<span style='color:#9a8790;'>↳ {esc(host)}</span>"
+            )
+
+            contador_html = (
+                f"<div style='font-size:11px;color:#7b6871;margin-top:3px;'>"
+                f"{num_alertas} alerta{'s' if num_alertas != 1 else ''} en el periodo</div>"
+                if modo_servicios == 'historico'
+                else ""
+            )
+
+            filas += (
+                f"<tr class='filterable-row {border_cls}' data-origin='servicios' "
+                f"data-host='{esc(host)}' style='{estilo_grupo}'>"
+                f"<td>{host_html}</td>"
+                f"<td><b>{esc(row['Service'])}</b>{contador_html}</td>"
+                f"<td><span class='badge {status_class}'>{esc(row['Status'])}</span></td>"
+                f"<td>{row['Datetime'].strftime('%d/%m/%Y %H:%M:%S')}</td>"
+                f"<td>{esc(row['Output'])}</td>"
+                f"</tr>"
+            )
+
+            host_anterior = host
+
         return filas
 
     html_logo = f'<img src="{logo_base64}" alt="Minsait Logo" style="max-height: 55px; width: auto; object-fit: contain;">' if logo_base64 else '<div style="background:#5a0d2e; color:white; font-weight:900; padding:10px 18px; border-radius:6px; font-size:20px;">MINSAIT</div>'
