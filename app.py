@@ -1,4 +1,4 @@
-"""Monitorización Centreon · v1.8. Ejecutar: streamlit run app.py"""
+"""Monitorización Centreon · v1.7. Ejecutar: streamlit run app.py"""
 import base64
 import csv
 import io
@@ -147,47 +147,39 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
             elif tipo_eq == 'RED': rec_red_consolidados.append(datos_consolidados)
             else: rec_otros_consolidados.append(datos_consolidados)
 
-    # Normalizamos el estado para evitar que espacios, minúsculas u otras
-    # pequeñas variaciones del CSV hagan desaparecer WARNING.
-    otros_df = otros_df.copy()
-    otros_df['_StatusNorm'] = otros_df['Status'].astype(str).str.strip().str.upper()
-
     estados_alerta = ['WARNING', 'CRITICAL', 'UNKNOWN', 'DOWN']
-    errores_df = otros_df[otros_df['_StatusNorm'].isin(estados_alerta)].copy()
-    errores_df['Status'] = errores_df['_StatusNorm']
+    errores_df = otros_df[otros_df['Status'].isin(estados_alerta)].copy()
 
     if modo_servicios == 'historico':
-        # FULL / HISTÓRICO:
-        # Una fila por cada Host + Servicio + Estado de alerta.
-        #
-        # Esto es intencionado: si un mismo servicio tuvo WARNING y después
-        # CRITICAL durante el periodo, FULL muestra ambos. De esta forma un
-        # WARNING histórico nunca queda oculto porque posteriormente el mismo
-        # servicio haya pasado a CRITICAL, UNKNOWN u OK.
+        # FULL/HISTÓRICO:
+        # conserva TODOS los servicios distintos que hayan generado una alerta
+        # durante el periodo. Para cada Host + Servicio se muestra su última
+        # alerta, pero nunca se reduce a una sola alerta por host.
         ultimos_errores = (
             errores_df
-            .sort_values(['Host', 'Service', 'Status', 'Datetime'], kind='stable')
-            .groupby(['Host', 'Service', 'Status'], as_index=False, sort=False)
+            .sort_values(['Host', 'Service', 'Datetime'], kind='stable')
+            .groupby(['Host', 'Service'], as_index=False, sort=False)
             .tail(1)
             .copy()
         )
 
+        # Nº de eventos de alerta que tuvo cada servicio durante el periodo.
         conteos_alerta = (
             errores_df
-            .groupby(['Host', 'Service', 'Status'], dropna=False)
+            .groupby(['Host', 'Service'], dropna=False)
             .size()
             .rename('Num_Alertas')
             .reset_index()
         )
         ultimos_errores = ultimos_errores.merge(
             conteos_alerta,
-            on=['Host', 'Service', 'Status'],
+            on=['Host', 'Service'],
             how='left'
         )
     else:
         # ÚLTIMO ESTADO:
-        # Solo aparece un servicio cuando su último evento del periodo sigue
-        # siendo WARNING/CRITICAL/UNKNOWN/DOWN.
+        # solo aparecen los servicios cuyo último evento real del CSV
+        # continúa siendo WARNING/CRITICAL/UNKNOWN/DOWN.
         ultimos = (
             otros_df
             .sort_values(['Host', 'Service', 'Datetime'], kind='stable')
@@ -195,15 +187,8 @@ def generar_informes(data, zona_origen='UTC', centro='SAT CI Puertollano', logo_
             .tail(1)
             .copy()
         )
-        ultimos_errores = ultimos[
-            ultimos['_StatusNorm'].isin(estados_alerta)
-        ].copy()
-        ultimos_errores['Status'] = ultimos_errores['_StatusNorm']
+        ultimos_errores = ultimos[ultimos['Status'].isin(estados_alerta)].copy()
         ultimos_errores['Num_Alertas'] = 1
-
-    # Campo auxiliar ya no necesario para el informe.
-    if '_StatusNorm' in ultimos_errores.columns:
-        ultimos_errores = ultimos_errores.drop(columns=['_StatusNorm'])
 
     # Agrupación visual estable: todos los servicios de un mismo equipo juntos.
     if not ultimos_errores.empty:
@@ -665,7 +650,7 @@ def formatear_periodo_centreon(valor):
             pass
     return texto
 
-def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inicio, fecha_fin):
+def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inicio, fecha_fin, backup_html=None):
     """Envía un informe HTML mediante Gmail SMTP usando exclusivamente Streamlit Secrets."""
     import streamlit as st
 
@@ -706,6 +691,18 @@ def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inici
         except Exception:
             return texto
 
+    adjunto_backup = None
+    if tipo.lower() == 'full' and backup_html is not None:
+        nombre_backup, datos_backup = backup_html
+        nombre_backup = str(nombre_backup).replace('\\', '/').rsplit('/', 1)[-1]
+        if not nombre_backup.lower().endswith(('.html', '.htm')):
+            raise RuntimeError('El informe de backups debe ser un archivo HTML o HTM.')
+        if not datos_backup:
+            raise RuntimeError('El archivo de backups está vacío.')
+        if len(datos_backup) > 10 * 1024 * 1024:
+            raise RuntimeError('El informe de backups no puede superar los 10 MB.')
+        adjunto_backup = (nombre_backup, datos_backup)
+
     fecha_inicio_es = fecha_es(fecha_inicio)
     fecha_fin_es = fecha_es(fecha_fin)
 
@@ -716,7 +713,8 @@ def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inici
     msg.set_content(
         'Buenos días,\n\n'
         'Adjunto se remite el informe de monitorización Centreon correspondiente al periodo indicado.\n\n'
-        f'Centro: {centro}\n'
+        + ('También se adjunta el informe de backups de red.\n\n' if adjunto_backup else '')
+        + f'Centro: {centro}\n'
         f'Desde: {fecha_inicio_es}\n'
         f'Hasta: {fecha_fin_es}\n\n'
         'Informe generado automáticamente desde la aplicación de Monitorización Centreon.'
@@ -727,6 +725,12 @@ def enviar_informe_email(tipo, html_informe, nombre_archivo, centro, fecha_inici
         subtype='html',
         filename=nombre_archivo
     )
+
+    if adjunto_backup:
+        msg.add_attachment(
+            adjunto_backup[1], maintype='text', subtype='html',
+            filename=adjunto_backup[0]
+        )
 
     try:
         with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as smtp:
@@ -862,6 +866,23 @@ def main():
     c.download_button('⬇ Ambos informes (ZIP)', buffer.getvalue(), file_name=f'Informes_Centreon_{fecha}.zip', mime='application/zip', use_container_width=True)
 
     st.subheader('Envío por email')
+    backup_upload = st.file_uploader(
+        'Informe de backups de red (HTML opcional, solo para el FULL)',
+        type=['html', 'htm'], key='backup_red_html',
+        help='Se enviará como segundo adjunto al correo FULL. Máximo 10 MB.'
+    )
+    backup_html = None
+    backup_error = False
+    if backup_upload is not None:
+        datos_backup = backup_upload.getvalue()
+        if not datos_backup or len(datos_backup) > 10 * 1024 * 1024:
+            st.error('El HTML de backups debe contener datos y no superar los 10 MB. Retíralo o selecciona otro archivo.')
+            backup_error = True
+        else:
+            backup_html = (backup_upload.name, datos_backup)
+            st.caption(f'Adjunto adicional del FULL: {backup_upload.name}')
+    else:
+        st.caption('Sin HTML de backups seleccionado: el FULL se enviará solo con el informe Centreon.')
     e1, e2 = st.columns(2)
     if e1.button('📧 Enviar informe NORMAL', type='primary', use_container_width=True):
         try:
@@ -871,10 +892,10 @@ def main():
         except RuntimeError as exc:
             st.error(str(exc))
 
-    if e2.button('📧 Enviar informe FULL', use_container_width=True):
+    if e2.button('📧 Enviar informe FULL', use_container_width=True, disabled=backup_error):
         try:
             with st.spinner('Enviando informe FULL…'):
-                destinos = enviar_informe_email('full', result['full'], nombre_email, centro, result['inicio'], result['fin'])
+                destinos = enviar_informe_email('full', result['full'], nombre_email, centro, result['inicio'], result['fin'], backup_html=backup_html)
             st.success('Informe enviado correctamente a: ' + ', '.join(destinos))
         except RuntimeError as exc:
             st.error(str(exc))
