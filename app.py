@@ -1,4 +1,4 @@
-"""Monitorización Centreon · v1.7. Ejecutar: streamlit run app.py"""
+"""Monitorización Centreon · v1.8. Ejecutar: streamlit run app.py"""
 import base64
 import csv
 import io
@@ -18,6 +18,15 @@ def esc(value):
 
 def safe_json(value):
     return json.dumps(value, ensure_ascii=True).replace('<', r'\u003c').replace('>', r'\u003e').replace('&', r'\u0026')
+
+def _hora_ambigua_madrid(fecha):
+    """Verdadero si una hora local de Madrid se repite al pasar a invierno."""
+    from pytz.exceptions import AmbiguousTimeError
+    try:
+        pytz.timezone('Europe/Madrid').localize(fecha.to_pydatetime(), is_dst=None)
+    except AmbiguousTimeError:
+        return True
+    return False
 
 def leer_csv(data, zona_origen='UTC'):
     avisos = []
@@ -56,10 +65,41 @@ def leer_csv(data, zona_origen='UTC'):
     fechas = pd.to_datetime(df['Day'] + ' ' + df['Time'], format='mixed', dayfirst=True, errors='coerce')
     if fechas.isna().any():
         raise ValueError(f'Hay {int(fechas.isna().sum())} fechas no válidas en Day/Time.')
-    try:
-        df['Datetime'] = fechas.dt.tz_localize(zona_origen, ambiguous='raise', nonexistent='raise').dt.tz_convert('Europe/Madrid')
-    except Exception as exc:
-        raise ValueError('No se pueden interpretar las horas con la zona seleccionada. Para horas ambiguas por cambio de horario, exporta en UTC.') from exc
+    # Centreon exporta eventos en orden cronológico inverso. Durante el
+    # cambio de octubre, las 02:00-02:59 aparecen dos veces. Identificamos
+    # ambas ocurrencias por el salto de reloj dentro del orden del CSV.
+    if zona_origen == 'Europe/Madrid':
+        zona = pytz.timezone('Europe/Madrid')
+        ambiguas = fechas.map(lambda x: bool(x is not pd.NaT and
+            _hora_ambigua_madrid(x)))
+        if ambiguas.any():
+            # En orden descendente: primera franja 02h = CET (UTC+1),
+            # segunda franja 02h = CEST (UTC+2).
+            marcas = fechas.reset_index(drop=True)
+            saltos = [i for i in range(1, len(marcas))
+                      if marcas.iloc[i] > marcas.iloc[i - 1]]
+            # No deducir horas si hay saltos ajenos al retroceso de octubre.
+            saltos_validos = [i for i in saltos if
+                marcas.iloc[i].date() == marcas.iloc[i-1].date() and
+                marcas.iloc[i].hour == 2 and marcas.iloc[i-1].hour == 2 and
+                _hora_ambigua_madrid(marcas.iloc[i]) and
+                _hora_ambigua_madrid(marcas.iloc[i-1])]
+            if len(saltos) != 1 or len(saltos_validos) != 1:
+                raise ValueError('El CSV contiene horas duplicadas del cambio de horario, pero no se puede identificar de forma segura su orden. Exporta los eventos en UTC.')
+            corte = saltos_validos[0]
+            indicadores = [False if i < corte else True for i in range(len(fechas))]
+            df['Datetime'] = fechas.dt.tz_localize(zona_origen, ambiguous=indicadores,
+                nonexistent='raise').dt.tz_convert('Europe/Madrid')
+            avisos.append(f'Cambio de horario detectado: {int(ambiguas.sum())} eventos entre las 02:00 y las 02:59 se han desambiguado utilizando el orden original de Centreon.')
+        else:
+            df['Datetime'] = fechas.dt.tz_localize(zona_origen, ambiguous='raise',
+                nonexistent='raise').dt.tz_convert('Europe/Madrid')
+    else:
+        try:
+            df['Datetime'] = fechas.dt.tz_localize(zona_origen, ambiguous='raise',
+                nonexistent='raise').dt.tz_convert('Europe/Madrid')
+        except Exception as exc:
+            raise ValueError('No se pueden interpretar las horas con la zona seleccionada. Comprueba la zona horaria del CSV.') from exc
     df = df.sort_values('Datetime', kind='stable')
     if df.empty:
         avisos.append('El CSV tiene cabecera pero no contiene eventos.')
@@ -822,7 +862,7 @@ def main():
     with st.sidebar:
         st.header('Configuración del informe')
         centro = st.text_input('Centro / título', 'SAT CI Puertollano')
-        zona = 'Europe/Madrid'
+        zona = st.selectbox('Zona horaria del CSV', ['Europe/Madrid', 'UTC'], index=0, help='Selecciona UTC únicamente si Centreon exporta realmente los eventos en UTC.')
         modo = st.radio('Alertas de servicios', ['Histórico del periodo', 'Último estado registrado'], help='Histórico conserva el último error de cada servicio aunque luego se recupere. Último estado solo muestra servicios cuyo último evento del CSV es una alerta.')
         logo_upload = st.file_uploader('Logo Minsait (PNG opcional)', type=['png'])
         st.caption('También puedes añadir logo_minsait.png junto a app.py.')
